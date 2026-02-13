@@ -1,0 +1,15 @@
+# Local env and secrets
+.env
+
+# Python env/cache
+.venv/
+__pycache__/
+*.pyc
+
+# Local data/artifacts
+data/
+outputs/
+
+# OS/editor
+.DS_Store
+.vscode/
