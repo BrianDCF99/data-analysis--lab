@@ -984,6 +984,7 @@ def create_app(
       let selectedTimeframeId = "1m";
       const viewStateBySymbol = {};
       let relayoutCaptureBound = false;
+      let clickMarkerBound = false;
       let isProgrammaticLayoutChange = false;
       let lastTogglePanelSignature = "";
       let currentAiPreview = null;
@@ -991,6 +992,7 @@ def create_app(
       let aiPreviewFailed = false;
       const savedSnapshotItemsBySymbol = {};
       const selectedSnapshotIdBySymbol = {};
+      const markerLinesByView = {};
 
       function currentSymbol() {
         if (idx < 0 || idx >= symbols.length) return null;
@@ -1092,6 +1094,10 @@ def create_app(
           selectedTimeframeId = snapTf;
           if (timeframeSelectEl) timeframeSelectEl.value = snapTf;
         }
+        const markerLines = normalizeMarkerLines(
+          Array.isArray(snap.marker_lines) ? snap.marker_lines : []
+        );
+        setMarkerLines(symbol, selectedTimeframeId, markerLines);
 
         const toggles = snap.toggles && typeof snap.toggles === "object" ? snap.toggles : {};
         for (const def of SERIES_DEFS) {
@@ -1406,6 +1412,7 @@ def create_app(
           selected_metric_id: selectedMetricScaleId || null,
           selected_metric_scale_key: selectedScaleKey || null,
           toggles: { ...visibilityState },
+          marker_lines: [...getMarkerLines(symbol, selectedTimeframeId)],
           visible_series: currentVisibleSeriesState(),
           view_state: {
             x_range: state.xRange ? [...state.xRange] : null,
@@ -1703,6 +1710,74 @@ def create_app(
         return `${symbol}::${selectedTimeframeId}`;
       }
 
+      function viewStateKeyFor(symbol, timeframeId) {
+        return `${symbol}::${timeframeId}`;
+      }
+
+      function normalizeMarkerTimestamp(value) {
+        if (value === null || value === undefined) return null;
+        const raw = String(value).trim();
+        if (!raw) return null;
+        const parsedMs = Date.parse(raw);
+        if (Number.isFinite(parsedMs)) {
+          return new Date(parsedMs).toISOString();
+        }
+        return null;
+      }
+
+      function normalizeMarkerLines(lines) {
+        if (!Array.isArray(lines)) return [];
+        const out = [];
+        const seen = new Set();
+        for (const raw of lines) {
+          const ts = normalizeMarkerTimestamp(raw);
+          if (!ts) continue;
+          if (seen.has(ts)) continue;
+          seen.add(ts);
+          out.push(ts);
+        }
+        out.sort((a, b) => Date.parse(a) - Date.parse(b));
+        return out;
+      }
+
+      function getMarkerLines(symbol, timeframeId = selectedTimeframeId) {
+        const key = viewStateKeyFor(symbol, timeframeId);
+        if (!Array.isArray(markerLinesByView[key])) {
+          markerLinesByView[key] = [];
+        }
+        return markerLinesByView[key];
+      }
+
+      function setMarkerLines(symbol, timeframeId, lines) {
+        const key = viewStateKeyFor(symbol, timeframeId);
+        markerLinesByView[key] = normalizeMarkerLines(lines);
+      }
+
+      function addMarkerLine(symbol, xValue) {
+        const markerTs = normalizeMarkerTimestamp(xValue);
+        if (!markerTs) return false;
+        const existing = getMarkerLines(symbol, selectedTimeframeId);
+        if (existing.includes(markerTs)) return false;
+        const next = normalizeMarkerLines([...existing, markerTs]);
+        setMarkerLines(symbol, selectedTimeframeId, next);
+        return true;
+      }
+
+      function markerShapesForSymbol(symbol) {
+        const lines = getMarkerLines(symbol, selectedTimeframeId);
+        return lines.map((ts) => ({
+          type: "line",
+          xref: "x",
+          yref: "paper",
+          x0: ts,
+          x1: ts,
+          y0: 0,
+          y1: 1,
+          line: { color: "#f59e0b", width: 1.1, dash: "dot" },
+          layer: "above"
+        }));
+      }
+
       function isFiniteNumber(value) {
         return typeof value === "number" && Number.isFinite(value);
       }
@@ -1934,6 +2009,29 @@ def create_app(
         });
 
         relayoutCaptureBound = true;
+      }
+
+      function bindClickMarkerCapture() {
+        if (clickMarkerBound) return;
+        if (typeof chartEl.on !== "function") return;
+
+        chartEl.on("plotly_click", (eventData) => {
+          if (!eventData || !currentPayload) return;
+          const symbol = currentSymbol();
+          if (!symbol) return;
+
+          const points = Array.isArray(eventData.points) ? eventData.points : [];
+          const firstPoint = points.length > 0 ? points[0] : null;
+          const xVal = firstPoint && firstPoint.x !== undefined ? firstPoint.x : null;
+          if (xVal === null) return;
+
+          const changed = addMarkerLine(symbol, xVal);
+          if (!changed) return;
+          snapshotCurrentLayoutState(symbol, selectedMetricScaleId);
+          renderSeries(currentPayload, symbol);
+        });
+
+        clickMarkerBound = true;
       }
 
       function snapshotCurrentLayoutState(symbol, metricIdForY2 = selectedMetricScaleId) {
@@ -2195,6 +2293,7 @@ def create_app(
           520,
           Math.floor(chartEl.clientHeight || chartEl.getBoundingClientRect().height || (window.innerHeight - 170))
         );
+        const markerShapes = markerShapesForSymbol(symbol);
         const layout = {
           hovermode: "x unified",
           dragmode: "pan",
@@ -2209,6 +2308,7 @@ def create_app(
           margin: { l: 75, r: rightMargin, t: 32, b: 45 },
           xaxis: { title: "Time (UTC)", rangeslider: { visible: false }, gridcolor: "#1e293b" },
           yaxis: { title: "Price", gridcolor: "#1e293b" },
+          shapes: markerShapes,
           ...axisDefs
         };
 
@@ -2232,6 +2332,7 @@ def create_app(
           isProgrammaticLayoutChange = false;
         }
         bindRelayoutCapture();
+        bindClickMarkerCapture();
 
         const panelSig = togglePanelSignature(seriesMeta);
         if (panelSig !== lastTogglePanelSignature) {
@@ -2241,7 +2342,7 @@ def create_app(
         const scaleLabel = (selectedMetric && selectedScaleKey)
           ? metricScaleLabel(selectedScaleKey, selectedMetric.label)
           : "None";
-        metaText.textContent = `${symbol} | TF: ${selectedTimeframeId} | Rows: ${payload.rows || 0} | Active metrics: ${metricCount} | Right scale: ${scaleLabel}`;
+        metaText.textContent = `${symbol} | TF: ${selectedTimeframeId} | Rows: ${payload.rows || 0} | Active metrics: ${metricCount} | Markers: ${markerShapes.length} | Right scale: ${scaleLabel}`;
 
         const url = new URL(window.location.href);
         url.searchParams.set("symbol", symbol);
