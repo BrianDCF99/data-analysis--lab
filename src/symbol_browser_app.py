@@ -1710,19 +1710,47 @@ def create_app(
         return `${symbol}::${selectedTimeframeId}`;
       }
 
+      function parseTimestampMsUtc(value) {
+        if (value === null || value === undefined) return null;
+        if (typeof value === "number" && Number.isFinite(value)) {
+          // Treat small values as seconds, otherwise milliseconds.
+          return value < 1e12 ? Math.round(value * 1000) : Math.round(value);
+        }
+        if (value instanceof Date) {
+          const t = value.getTime();
+          return Number.isFinite(t) ? t : null;
+        }
+
+        const raw = String(value).trim();
+        if (!raw) return null;
+        if (/^[+-]?\d+(\.\d+)?$/.test(raw)) {
+          const n = Number(raw);
+          if (!Number.isFinite(n)) return null;
+          return n < 1e12 ? Math.round(n * 1000) : Math.round(n);
+        }
+
+        let normalized = raw.replace(" ", "T");
+        const hasZone = /(?:[zZ]|[+\-]\d{2}:?\d{2})$/.test(normalized);
+        if (!hasZone) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+            normalized += "T00:00:00Z";
+          } else {
+            normalized += "Z";
+          }
+        }
+        const parsedMs = Date.parse(normalized);
+        if (!Number.isFinite(parsedMs)) return null;
+        return parsedMs;
+      }
+
       function viewStateKeyFor(symbol, timeframeId) {
         return `${symbol}::${timeframeId}`;
       }
 
       function normalizeMarkerTimestamp(value) {
-        if (value === null || value === undefined) return null;
-        const raw = String(value).trim();
-        if (!raw) return null;
-        const parsedMs = Date.parse(raw);
-        if (Number.isFinite(parsedMs)) {
-          return new Date(parsedMs).toISOString();
-        }
-        return null;
+        const parsedMs = parseTimestampMsUtc(value);
+        if (!Number.isFinite(parsedMs)) return null;
+        return new Date(parsedMs).toISOString();
       }
 
       function normalizeMarkerLines(lines) {
@@ -1803,8 +1831,8 @@ def create_app(
         const range = Array.isArray(xaxis.range) && xaxis.range.length === 2 ? xaxis.range : null;
         if (!range) return null;
 
-        const r0Ms = Date.parse(String(range[0]));
-        const r1Ms = Date.parse(String(range[1]));
+        const r0Ms = parseTimestampMsUtc(range[0]);
+        const r1Ms = parseTimestampMsUtc(range[1]);
         if (Number.isFinite(r0Ms) && Number.isFinite(r1Ms)) {
           const tMs = r0Ms + (clampedPx / axisLengthPx) * (r1Ms - r0Ms);
           return new Date(tMs).toISOString();
