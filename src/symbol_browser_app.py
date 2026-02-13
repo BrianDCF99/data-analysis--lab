@@ -2143,6 +2143,9 @@ def create_app(
         for (const item of visibleSeries) {
           const row = document.createElement("label");
           row.className = "toggle-row";
+          if (item.help) {
+            row.title = item.help;
+          }
           row.addEventListener("mouseenter", () => {
             if (item.help) scheduleIndicatorTooltip(row, item.help);
           });
@@ -2174,6 +2177,9 @@ def create_app(
           const txt = document.createElement("span");
           txt.className = "toggle-label";
           txt.textContent = item.label;
+          if (item.help) {
+            txt.title = item.help;
+          }
 
           const styleBtn = document.createElement("button");
           styleBtn.type = "button";
