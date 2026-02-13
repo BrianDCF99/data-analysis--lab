@@ -1723,16 +1723,16 @@ def create_app(
 
         const raw = String(value).trim();
         if (!raw) return null;
-        if (/^[+-]?\d+(\.\d+)?$/.test(raw)) {
+        if (/^[+-]?\\d+(\\.\\d+)?$/.test(raw)) {
           const n = Number(raw);
           if (!Number.isFinite(n)) return null;
           return n < 1e12 ? Math.round(n * 1000) : Math.round(n);
         }
 
         let normalized = raw.replace(" ", "T");
-        const hasZone = /(?:[zZ]|[+\-]\d{2}:?\d{2})$/.test(normalized);
+        const hasZone = /(?:[zZ]|[+\\-]\\d{2}:?\\d{2})$/.test(normalized);
         if (!hasZone) {
-          if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+          if (/^\\d{4}-\\d{2}-\\d{2}$/.test(normalized)) {
             normalized += "T00:00:00Z";
           } else {
             normalized += "Z";
