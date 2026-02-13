@@ -1013,6 +1013,38 @@ def create_app(
         metaText.textContent = String(msg || "");
       }
 
+      function applyLineDrawInteractionMode(enabled) {
+        const drawMode = Boolean(enabled);
+        if (chartEl) {
+          chartEl.style.cursor = drawMode ? "crosshair" : "";
+        }
+        const fullLayout = chartEl?._fullLayout;
+        if (!fullLayout || typeof Plotly === "undefined") return;
+        const targetDragmode = drawMode ? false : "pan";
+        const currentDragmode = fullLayout.dragmode;
+        if (currentDragmode === targetDragmode) return;
+
+        isProgrammaticLayoutChange = true;
+        const p = Plotly.relayout(chartEl, { dragmode: targetDragmode });
+        if (p && typeof p.finally === "function") {
+          p.finally(() => {
+            isProgrammaticLayoutChange = false;
+          });
+        } else {
+          isProgrammaticLayoutChange = false;
+        }
+      }
+
+      function setLineKeyState(enabled) {
+        const next = Boolean(enabled);
+        if (isLineKeyDown === next) return;
+        isLineKeyDown = next;
+        if (!next) {
+          activeLineDraw = null;
+        }
+        applyLineDrawInteractionMode(next);
+      }
+
       function setSavedSnapshotText(text, visible = true) {
         if (!savedSnapshotTextEl) return;
         savedSnapshotTextEl.value = String(text || "");
@@ -2271,7 +2303,10 @@ def create_app(
           };
           ev.preventDefault();
           ev.stopPropagation();
-        });
+          if (typeof ev.stopImmediatePropagation === "function") {
+            ev.stopImmediatePropagation();
+          }
+        }, true);
 
         window.addEventListener("mouseup", (ev) => {
           const draft = activeLineDraw;
@@ -2300,8 +2335,7 @@ def create_app(
         });
 
         window.addEventListener("blur", () => {
-          activeLineDraw = null;
-          isLineKeyDown = false;
+          setLineKeyState(false);
         });
 
         lineDrawBound = true;
@@ -2571,7 +2605,7 @@ def create_app(
         const allShapes = [...markerShapes, ...drawnShapes];
         const layout = {
           hovermode: "x unified",
-          dragmode: "pan",
+          dragmode: isLineKeyDown ? false : "pan",
           uirevision: `${symbol}:${selectedTimeframeId}`,
           template: "plotly_dark",
           paper_bgcolor: "#020617",
@@ -2802,7 +2836,7 @@ def create_app(
         }
         if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA")) return;
         if (ev.key && ev.key.toLowerCase() === "l") {
-          isLineKeyDown = true;
+          setLineKeyState(true);
           return;
         }
         if (ev.key === "ArrowLeft") {
@@ -2815,7 +2849,7 @@ def create_app(
       });
       window.addEventListener("keyup", (ev) => {
         if (ev.key && ev.key.toLowerCase() === "l") {
-          isLineKeyDown = false;
+          setLineKeyState(false);
         }
       });
 
