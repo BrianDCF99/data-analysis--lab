@@ -1786,15 +1786,19 @@ def create_app(
         const size = fullLayout?._size;
         if (!xaxis || !size) return null;
 
-        const leftPx = Number(size.l);
-        const plotWidthPx = Number(size.w);
-        if (!Number.isFinite(leftPx) || !Number.isFinite(plotWidthPx) || plotWidthPx <= 0) {
+        const axisOffsetPx = Number.isFinite(xaxis._offset)
+          ? Number(xaxis._offset)
+          : Number(size.l);
+        const axisLengthPx = Number.isFinite(xaxis._length)
+          ? Number(xaxis._length)
+          : Number(size.w);
+        if (!Number.isFinite(axisOffsetPx) || !Number.isFinite(axisLengthPx) || axisLengthPx <= 0) {
           return null;
         }
 
         const rect = chartEl.getBoundingClientRect();
-        const relPx = rawEvent.clientX - rect.left - leftPx;
-        const clampedPx = Math.min(Math.max(relPx, 0), plotWidthPx);
+        const relPx = rawEvent.clientX - rect.left - axisOffsetPx;
+        const clampedPx = Math.min(Math.max(relPx, 0), axisLengthPx);
 
         const range = Array.isArray(xaxis.range) && xaxis.range.length === 2 ? xaxis.range : null;
         if (!range) return null;
@@ -1802,14 +1806,14 @@ def create_app(
         const r0Ms = Date.parse(String(range[0]));
         const r1Ms = Date.parse(String(range[1]));
         if (Number.isFinite(r0Ms) && Number.isFinite(r1Ms)) {
-          const tMs = r0Ms + (clampedPx / plotWidthPx) * (r1Ms - r0Ms);
+          const tMs = r0Ms + (clampedPx / axisLengthPx) * (r1Ms - r0Ms);
           return new Date(tMs).toISOString();
         }
 
         const r0 = Number(range[0]);
         const r1 = Number(range[1]);
         if (Number.isFinite(r0) && Number.isFinite(r1)) {
-          const xNum = r0 + (clampedPx / plotWidthPx) * (r1 - r0);
+          const xNum = r0 + (clampedPx / axisLengthPx) * (r1 - r0);
           return xNum;
         }
         return null;
