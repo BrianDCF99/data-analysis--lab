@@ -1781,11 +1781,44 @@ def create_app(
         markerLinesByView[key] = normalizeMarkerLines(lines);
       }
 
+      function markerToggleToleranceMs() {
+        const fullLayout = chartEl?._fullLayout;
+        const xaxis = fullLayout?.xaxis;
+        if (!xaxis) return 1;
+        const axisLengthPx = Number.isFinite(xaxis._length) ? Number(xaxis._length) : null;
+        const range = Array.isArray(xaxis.range) && xaxis.range.length === 2 ? xaxis.range : null;
+        if (!range || !axisLengthPx || axisLengthPx <= 0) return 1;
+        const r0Ms = parseTimestampMsUtc(range[0]);
+        const r1Ms = parseTimestampMsUtc(range[1]);
+        if (!Number.isFinite(r0Ms) || !Number.isFinite(r1Ms)) return 1;
+        const spanMs = Math.abs(r1Ms - r0Ms);
+        const pxTolerance = 8;
+        return Math.max(1, (spanMs * pxTolerance) / axisLengthPx);
+      }
+
       function addMarkerLine(symbol, xValue) {
         const markerTs = normalizeMarkerTimestamp(xValue);
         if (!markerTs) return false;
+        const markerMs = parseTimestampMsUtc(markerTs);
+        if (!Number.isFinite(markerMs)) return false;
         const existing = getMarkerLines(symbol, selectedTimeframeId);
-        if (existing.includes(markerTs)) return false;
+        const toleranceMs = markerToggleToleranceMs();
+        let nearestIdx = -1;
+        let nearestDiff = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < existing.length; i += 1) {
+          const ms = parseTimestampMsUtc(existing[i]);
+          if (!Number.isFinite(ms)) continue;
+          const diff = Math.abs(ms - markerMs);
+          if (diff <= toleranceMs && diff < nearestDiff) {
+            nearestDiff = diff;
+            nearestIdx = i;
+          }
+        }
+        if (nearestIdx >= 0) {
+          const next = existing.filter((_, idx) => idx !== nearestIdx);
+          setMarkerLines(symbol, selectedTimeframeId, next);
+          return true;
+        }
         const next = normalizeMarkerLines([...existing, markerTs]);
         setMarkerLines(symbol, selectedTimeframeId, next);
         return true;
