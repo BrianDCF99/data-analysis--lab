@@ -1778,6 +1778,43 @@ def create_app(
         }));
       }
 
+      function xValueFromCursorEvent(eventData) {
+        const rawEvent = eventData?.event;
+        if (!rawEvent || typeof rawEvent.clientX !== "number") return null;
+        const fullLayout = chartEl?._fullLayout;
+        const xaxis = fullLayout?.xaxis;
+        const size = fullLayout?._size;
+        if (!xaxis || !size) return null;
+
+        const leftPx = Number(size.l);
+        const plotWidthPx = Number(size.w);
+        if (!Number.isFinite(leftPx) || !Number.isFinite(plotWidthPx) || plotWidthPx <= 0) {
+          return null;
+        }
+
+        const rect = chartEl.getBoundingClientRect();
+        const relPx = rawEvent.clientX - rect.left - leftPx;
+        const clampedPx = Math.min(Math.max(relPx, 0), plotWidthPx);
+
+        const range = Array.isArray(xaxis.range) && xaxis.range.length === 2 ? xaxis.range : null;
+        if (!range) return null;
+
+        const r0Ms = Date.parse(String(range[0]));
+        const r1Ms = Date.parse(String(range[1]));
+        if (Number.isFinite(r0Ms) && Number.isFinite(r1Ms)) {
+          const tMs = r0Ms + (clampedPx / plotWidthPx) * (r1Ms - r0Ms);
+          return new Date(tMs).toISOString();
+        }
+
+        const r0 = Number(range[0]);
+        const r1 = Number(range[1]);
+        if (Number.isFinite(r0) && Number.isFinite(r1)) {
+          const xNum = r0 + (clampedPx / plotWidthPx) * (r1 - r0);
+          return xNum;
+        }
+        return null;
+      }
+
       function isFiniteNumber(value) {
         return typeof value === "number" && Number.isFinite(value);
       }
@@ -2022,7 +2059,10 @@ def create_app(
 
           const points = Array.isArray(eventData.points) ? eventData.points : [];
           const firstPoint = points.length > 0 ? points[0] : null;
-          const xVal = firstPoint && firstPoint.x !== undefined ? firstPoint.x : null;
+          const xFromCursor = xValueFromCursorEvent(eventData);
+          const xVal = xFromCursor !== null
+            ? xFromCursor
+            : (firstPoint && firstPoint.x !== undefined ? firstPoint.x : null);
           if (xVal === null) return;
 
           const changed = addMarkerLine(symbol, xVal);
