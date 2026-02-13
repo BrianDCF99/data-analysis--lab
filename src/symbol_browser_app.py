@@ -866,7 +866,7 @@ def create_app(
         <button id="nextBtn" title="Next symbol (Right Arrow)">Next →</button>
       </div>
       <div class="meta" id="metaText"></div>
-      <div class="meta">Keyboard: Left/Right arrows move previous/next symbol</div>
+      <div class="meta">Keyboard: Left/Right arrows move previous/next symbol | Hold L + drag on chart to draw a line</div>
       <div class="main">
         <aside class="legend-panel">
           <div class="legend-title">Series Toggles</div>
@@ -985,6 +985,7 @@ def create_app(
       const viewStateBySymbol = {};
       let relayoutCaptureBound = false;
       let clickMarkerBound = false;
+      let lineDrawBound = false;
       let isProgrammaticLayoutChange = false;
       let lastTogglePanelSignature = "";
       let currentAiPreview = null;
@@ -993,6 +994,9 @@ def create_app(
       const savedSnapshotItemsBySymbol = {};
       const selectedSnapshotIdBySymbol = {};
       const markerLinesByView = {};
+      const drawnLinesByView = {};
+      let isLineKeyDown = false;
+      let activeLineDraw = null;
 
       function currentSymbol() {
         if (idx < 0 || idx >= symbols.length) return null;
@@ -1098,6 +1102,10 @@ def create_app(
           Array.isArray(snap.marker_lines) ? snap.marker_lines : []
         );
         setMarkerLines(symbol, selectedTimeframeId, markerLines);
+        const drawnLines = normalizeDrawnLines(
+          Array.isArray(snap.drawn_lines) ? snap.drawn_lines : []
+        );
+        setDrawnLines(symbol, selectedTimeframeId, drawnLines);
 
         const toggles = snap.toggles && typeof snap.toggles === "object" ? snap.toggles : {};
         for (const def of SERIES_DEFS) {
@@ -1413,6 +1421,7 @@ def create_app(
           selected_metric_scale_key: selectedScaleKey || null,
           toggles: { ...visibilityState },
           marker_lines: [...getMarkerLines(symbol, selectedTimeframeId)],
+          drawn_lines: JSON.parse(JSON.stringify(getDrawnLines(symbol, selectedTimeframeId))),
           visible_series: currentVisibleSeriesState(),
           view_state: {
             x_range: state.xRange ? [...state.xRange] : null,
@@ -1768,6 +1777,33 @@ def create_app(
         return out;
       }
 
+      function normalizeFiniteNumber(value) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return null;
+        return num;
+      }
+
+      function normalizeDrawnLine(line) {
+        if (!line || typeof line !== "object") return null;
+        const x0 = normalizeMarkerTimestamp(line.x0);
+        const x1 = normalizeMarkerTimestamp(line.x1);
+        const y0 = normalizeFiniteNumber(line.y0);
+        const y1 = normalizeFiniteNumber(line.y1);
+        if (!x0 || !x1 || y0 === null || y1 === null) return null;
+        return { x0, y0, x1, y1 };
+      }
+
+      function normalizeDrawnLines(lines) {
+        if (!Array.isArray(lines)) return [];
+        const out = [];
+        for (const raw of lines) {
+          const normalized = normalizeDrawnLine(raw);
+          if (!normalized) continue;
+          out.push(normalized);
+        }
+        return out;
+      }
+
       function getMarkerLines(symbol, timeframeId = selectedTimeframeId) {
         const key = viewStateKeyFor(symbol, timeframeId);
         if (!Array.isArray(markerLinesByView[key])) {
@@ -1779,6 +1815,28 @@ def create_app(
       function setMarkerLines(symbol, timeframeId, lines) {
         const key = viewStateKeyFor(symbol, timeframeId);
         markerLinesByView[key] = normalizeMarkerLines(lines);
+      }
+
+      function getDrawnLines(symbol, timeframeId = selectedTimeframeId) {
+        const key = viewStateKeyFor(symbol, timeframeId);
+        if (!Array.isArray(drawnLinesByView[key])) {
+          drawnLinesByView[key] = [];
+        }
+        return drawnLinesByView[key];
+      }
+
+      function setDrawnLines(symbol, timeframeId, lines) {
+        const key = viewStateKeyFor(symbol, timeframeId);
+        drawnLinesByView[key] = normalizeDrawnLines(lines);
+      }
+
+      function addDrawnLine(symbol, line) {
+        const normalized = normalizeDrawnLine(line);
+        if (!normalized) return false;
+        const existing = getDrawnLines(symbol, selectedTimeframeId);
+        const next = [...existing, normalized];
+        setDrawnLines(symbol, selectedTimeframeId, next);
+        return true;
       }
 
       function markerToggleToleranceMs() {
@@ -1839,9 +1897,29 @@ def create_app(
         }));
       }
 
+      function drawnLineShapesForSymbol(symbol) {
+        const lines = getDrawnLines(symbol, selectedTimeframeId);
+        return lines.map((line) => ({
+          type: "line",
+          xref: "x",
+          yref: "y",
+          x0: line.x0,
+          y0: line.y0,
+          x1: line.x1,
+          y1: line.y1,
+          line: { color: "#38bdf8", width: 1.1 },
+          layer: "above"
+        }));
+      }
+
       function xValueFromCursorEvent(eventData) {
         const rawEvent = eventData?.event;
         if (!rawEvent || typeof rawEvent.clientX !== "number") return null;
+        return xValueFromClientX(rawEvent.clientX);
+      }
+
+      function xValueFromClientX(clientX) {
+        if (!Number.isFinite(clientX)) return null;
         const fullLayout = chartEl?._fullLayout;
         const xaxis = fullLayout?.xaxis;
         const size = fullLayout?._size;
@@ -1858,7 +1936,7 @@ def create_app(
         }
 
         const rect = chartEl.getBoundingClientRect();
-        const relPx = rawEvent.clientX - rect.left - axisOffsetPx;
+        const relPx = clientX - rect.left - axisOffsetPx;
         const clampedPx = Math.min(Math.max(relPx, 0), axisLengthPx);
 
         const range = Array.isArray(xaxis.range) && xaxis.range.length === 2 ? xaxis.range : null;
@@ -1878,6 +1956,37 @@ def create_app(
           return xNum;
         }
         return null;
+      }
+
+      function yValueFromClientY(clientY) {
+        if (!Number.isFinite(clientY)) return null;
+        const fullLayout = chartEl?._fullLayout;
+        const yaxis = fullLayout?.yaxis;
+        const size = fullLayout?._size;
+        if (!yaxis || !size) return null;
+
+        const axisOffsetPx = Number.isFinite(yaxis._offset)
+          ? Number(yaxis._offset)
+          : Number(size.t);
+        const axisLengthPx = Number.isFinite(yaxis._length)
+          ? Number(yaxis._length)
+          : Number(size.h);
+        if (!Number.isFinite(axisOffsetPx) || !Number.isFinite(axisLengthPx) || axisLengthPx <= 0) {
+          return null;
+        }
+
+        const rect = chartEl.getBoundingClientRect();
+        const relPx = clientY - rect.top - axisOffsetPx;
+        const clampedPx = Math.min(Math.max(relPx, 0), axisLengthPx);
+
+        const range = Array.isArray(yaxis.range) && yaxis.range.length === 2 ? yaxis.range : null;
+        if (!range) return null;
+        const r0 = Number(range[0]);
+        const r1 = Number(range[1]);
+        if (!Number.isFinite(r0) || !Number.isFinite(r1)) return null;
+
+        const frac = clampedPx / axisLengthPx;
+        return r1 + frac * (r0 - r1);
       }
 
       function isFiniteNumber(value) {
@@ -2119,6 +2228,7 @@ def create_app(
 
         chartEl.on("plotly_click", (eventData) => {
           if (!eventData || !currentPayload) return;
+          if (isLineKeyDown || activeLineDraw) return;
           const symbol = currentSymbol();
           if (!symbol) return;
 
@@ -2137,6 +2247,64 @@ def create_app(
         });
 
         clickMarkerBound = true;
+      }
+
+      function bindLineDrawCapture() {
+        if (lineDrawBound) return;
+
+        chartEl.addEventListener("mousedown", (ev) => {
+          if (ev.button !== 0) return;
+          if (!isLineKeyDown) return;
+          const symbol = currentSymbol();
+          if (!symbol || !currentPayload) return;
+
+          const x0 = xValueFromClientX(ev.clientX);
+          const y0 = yValueFromClientY(ev.clientY);
+          if (x0 === null || y0 === null) return;
+
+          activeLineDraw = {
+            symbol,
+            startX: x0,
+            startY: y0,
+            startClientX: ev.clientX,
+            startClientY: ev.clientY,
+          };
+          ev.preventDefault();
+          ev.stopPropagation();
+        });
+
+        window.addEventListener("mouseup", (ev) => {
+          const draft = activeLineDraw;
+          if (!draft) return;
+          activeLineDraw = null;
+
+          const symbol = currentSymbol();
+          if (!symbol || symbol !== draft.symbol || !currentPayload) return;
+
+          const movedPx = Math.hypot(ev.clientX - draft.startClientX, ev.clientY - draft.startClientY);
+          if (!Number.isFinite(movedPx) || movedPx < 3) return;
+
+          const x1 = xValueFromClientX(ev.clientX);
+          const y1 = yValueFromClientY(ev.clientY);
+          if (x1 === null || y1 === null) return;
+
+          const changed = addDrawnLine(symbol, {
+            x0: draft.startX,
+            y0: draft.startY,
+            x1,
+            y1,
+          });
+          if (!changed) return;
+          snapshotCurrentLayoutState(symbol, selectedMetricScaleId);
+          renderSeries(currentPayload, symbol);
+        });
+
+        window.addEventListener("blur", () => {
+          activeLineDraw = null;
+          isLineKeyDown = false;
+        });
+
+        lineDrawBound = true;
       }
 
       function snapshotCurrentLayoutState(symbol, metricIdForY2 = selectedMetricScaleId) {
@@ -2399,6 +2567,8 @@ def create_app(
           Math.floor(chartEl.clientHeight || chartEl.getBoundingClientRect().height || (window.innerHeight - 170))
         );
         const markerShapes = markerShapesForSymbol(symbol);
+        const drawnShapes = drawnLineShapesForSymbol(symbol);
+        const allShapes = [...markerShapes, ...drawnShapes];
         const layout = {
           hovermode: "x unified",
           dragmode: "pan",
@@ -2413,7 +2583,7 @@ def create_app(
           margin: { l: 75, r: rightMargin, t: 32, b: 45 },
           xaxis: { title: "Time (UTC)", rangeslider: { visible: false }, gridcolor: "#1e293b" },
           yaxis: { title: "Price", gridcolor: "#1e293b" },
-          shapes: markerShapes,
+          shapes: allShapes,
           ...axisDefs
         };
 
@@ -2438,6 +2608,7 @@ def create_app(
         }
         bindRelayoutCapture();
         bindClickMarkerCapture();
+        bindLineDrawCapture();
 
         const panelSig = togglePanelSignature(seriesMeta);
         if (panelSig !== lastTogglePanelSignature) {
@@ -2447,7 +2618,7 @@ def create_app(
         const scaleLabel = (selectedMetric && selectedScaleKey)
           ? metricScaleLabel(selectedScaleKey, selectedMetric.label)
           : "None";
-        metaText.textContent = `${symbol} | TF: ${selectedTimeframeId} | Rows: ${payload.rows || 0} | Active metrics: ${metricCount} | Markers: ${markerShapes.length} | Right scale: ${scaleLabel}`;
+        metaText.textContent = `${symbol} | TF: ${selectedTimeframeId} | Rows: ${payload.rows || 0} | Active metrics: ${metricCount} | Markers: ${markerShapes.length} | Drawn lines: ${drawnShapes.length} | Right scale: ${scaleLabel}`;
 
         const url = new URL(window.location.href);
         url.searchParams.set("symbol", symbol);
@@ -2630,12 +2801,21 @@ def create_app(
           return;
         }
         if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA")) return;
+        if (ev.key && ev.key.toLowerCase() === "l") {
+          isLineKeyDown = true;
+          return;
+        }
         if (ev.key === "ArrowLeft") {
           ev.preventDefault();
           void stepSymbol(-1);
         } else if (ev.key === "ArrowRight") {
           ev.preventDefault();
           void stepSymbol(1);
+        }
+      });
+      window.addEventListener("keyup", (ev) => {
+        if (ev.key && ev.key.toLowerCase() === "l") {
+          isLineKeyDown = false;
         }
       });
 
