@@ -104,9 +104,52 @@ def create_app(
     gemini_cfg: GeminiNotesConfig,
 ) -> Flask:
     app = Flask(__name__)
+    symbols_cache: list[str] | None = None
 
     def get_conn() -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(db_path), read_only=True)
+
+    def load_symbols(conn: duckdb.DuckDBPyConnection) -> list[str]:
+        symbol_queries = [
+            # Fast path on large datasets: read distinct symbols directly from 1m market kline data.
+            """
+            SELECT DISTINCT COALESCE(symbol, symbol_partition) AS symbol
+            FROM market_kline
+            WHERE interval = '1'
+              AND COALESCE(symbol, symbol_partition) IS NOT NULL
+              AND COALESCE(symbol, symbol_partition) <> ''
+            ORDER BY symbol
+            """,
+            """
+            SELECT DISTINCT symbol
+            FROM symbol_timeseries_1m
+            WHERE symbol IS NOT NULL AND symbol <> ''
+            ORDER BY symbol
+            """,
+            """
+            SELECT DISTINCT COALESCE(symbol, symbol_partition) AS symbol
+            FROM instrument
+            WHERE COALESCE(symbol, symbol_partition) IS NOT NULL
+              AND COALESCE(symbol, symbol_partition) <> ''
+            ORDER BY symbol
+            """,
+            """
+            SELECT DISTINCT COALESCE(symbol, symbol_partition) AS symbol
+            FROM meta
+            WHERE COALESCE(symbol, symbol_partition) IS NOT NULL
+              AND COALESCE(symbol, symbol_partition) <> ''
+            ORDER BY symbol
+            """,
+        ]
+        for query in symbol_queries:
+            try:
+                rows = conn.execute(query).fetchall()
+            except Exception:
+                continue
+            symbols = [str(r[0]) for r in rows if r and r[0]]
+            if symbols:
+                return symbols
+        return []
 
     @app.get("/health")
     def health() -> tuple[dict[str, Any], int]:
@@ -118,18 +161,14 @@ def create_app(
 
     @app.get("/api/symbols")
     def api_symbols() -> tuple[dict[str, Any], int]:
+        nonlocal symbols_cache
+        if symbols_cache is not None:
+            return {"symbols": symbols_cache}, 200
+
         conn = get_conn()
         try:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT symbol
-                FROM symbol_timeseries_1m
-                WHERE symbol IS NOT NULL AND symbol <> ''
-                ORDER BY symbol
-                """
-            ).fetchall()
-            symbols = [str(r[0]) for r in rows if r and r[0]]
-            return {"symbols": symbols}, 200
+            symbols_cache = load_symbols(conn)
+            return {"symbols": symbols_cache}, 200
         finally:
             conn.close()
 
