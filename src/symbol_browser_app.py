@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -2672,6 +2673,29 @@ def require_view(db_path: Path, view_name: str) -> bool:
         conn.close()
 
 
+def can_bind_port(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def resolve_available_port(host: str, preferred_port: int, search_window: int = 20) -> int:
+    if can_bind_port(host, preferred_port):
+        return preferred_port
+    for offset in range(1, search_window + 1):
+        candidate = preferred_port + offset
+        if can_bind_port(host, candidate):
+            print(f"[warn] Port {preferred_port} is busy. Falling back to {candidate}.")
+            return candidate
+    raise RuntimeError(
+        f"No available port found in range {preferred_port}-{preferred_port + search_window} for host {host}."
+    )
+
+
 def main() -> int:
     args = parse_args()
     load_dotenv_file(Path(".env"))
@@ -2681,7 +2705,8 @@ def main() -> int:
 
     db_path = args.db_path or path_from_config(config, "paths", "duckdb_path")
     host = args.host or str(config.get("browser", {}).get("host", "127.0.0.1"))
-    port = args.port or int(config.get("browser", {}).get("port", 8051))
+    preferred_port = args.port or int(config.get("browser", {}).get("port", 8051))
+    port = resolve_available_port(host, preferred_port)
     start_ts_ms = config.get("plot", {}).get("start_ts_ms")
     end_ts_ms = config.get("plot", {}).get("end_ts_ms")
     notes_root_cfg = str(config.get("paths", {}).get("notes_root", "outputs/notes"))
