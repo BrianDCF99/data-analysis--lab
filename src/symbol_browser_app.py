@@ -864,6 +864,21 @@ def create_app(
         font-size: 12px;
         color: #94a3b8;
       }
+      .indicator-tooltip {
+        position: fixed;
+        z-index: 120;
+        max-width: 360px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: rgba(15, 23, 42, 0.96);
+        color: #e2e8f0;
+        font-size: 12px;
+        line-height: 1.4;
+        box-shadow: 0 6px 18px rgba(2, 6, 23, 0.45);
+        pointer-events: none;
+        display: none;
+      }
       #chart {
         width: 100%;
         min-width: 0;
@@ -962,6 +977,7 @@ def create_app(
         </div>
       </div>
     </div>
+    <div id="indicatorTooltip" class="indicator-tooltip"></div>
 
     <script>
       const selectEl = document.getElementById("symbolSelect");
@@ -986,20 +1002,139 @@ def create_app(
       const saveAsIsBtn = document.getElementById("saveAsIsBtn");
       const saveNoteBtn = document.getElementById("saveNoteBtn");
       const cancelNoteBtn = document.getElementById("cancelNoteBtn");
+      const indicatorTooltipEl = document.getElementById("indicatorTooltip");
 
       const SERIES_DEFS = [
-        { id: "trade_candle", type: "candlestick", label: "Trade Candle", defaultOn: true, group: "price", color: "#22c55e" },
-        { id: "mark_close", type: "line", key: "mark_close", label: "Mark Close", defaultOn: true, group: "price", color: "#22c55e", lineWidth: 1.0 },
-        { id: "index_close", type: "line", key: "index_close", label: "Index Close", defaultOn: true, group: "price", color: "#f59e0b", lineWidth: 1.0 },
-        { id: "premium_close", type: "line", key: "premium_close", label: "Premium Close", defaultOn: false, group: "metric", color: "#ec4899", lineWidth: 1.2 },
-        { id: "basis_bps", type: "line", key: "basis_bps", label: "Basis (bps)", defaultOn: false, group: "metric", color: "#ef4444", lineWidth: 1.2 },
-        { id: "kline_volume", type: "line", key: "kline_volume", label: "Volume", defaultOn: false, group: "metric", color: "#94a3b8", lineWidth: 1.2 },
-        { id: "kline_turnover", type: "line", key: "kline_turnover", label: "Turnover", defaultOn: false, group: "metric", color: "#64748b", lineWidth: 1.2 },
-        { id: "open_interest", type: "line", key: "open_interest", label: "Open Interest", defaultOn: false, group: "metric", color: "#a855f7", lineWidth: 1.2 },
-        { id: "buy_ratio", type: "line", key: "buy_ratio", label: "Buy Ratio", defaultOn: false, group: "metric", color: "#16a34a", lineWidth: 1.2 },
-        { id: "sell_ratio", type: "line", key: "sell_ratio", label: "Sell Ratio", defaultOn: false, group: "metric", color: "#f43f5e", lineWidth: 1.2 },
-        { id: "long_short_ratio", type: "line", key: "long_short_ratio", label: "Long/Short Ratio", defaultOn: false, group: "metric", color: "#14b8a6", lineWidth: 1.2 },
-        { id: "funding_rate", type: "markers", key: "funding_rate", xKey: "funding_ts", label: "Funding Rate", defaultOn: false, group: "metric", color: "#e2e8f0" }
+        {
+          id: "trade_candle",
+          type: "candlestick",
+          label: "Trade Candle",
+          defaultOn: true,
+          group: "price",
+          color: "#22c55e",
+          help: "Last-traded OHLC candles from market kline data. Green means close > open; red means close < open."
+        },
+        {
+          id: "mark_close",
+          type: "line",
+          key: "mark_close",
+          label: "Mark Close",
+          defaultOn: true,
+          group: "price",
+          color: "#22c55e",
+          lineWidth: 1.0,
+          help: "Mark close is the fair-price used for liquidation and unrealized PnL. Rising mark means fair-price repricing up; falling means repricing down."
+        },
+        {
+          id: "index_close",
+          type: "line",
+          key: "index_close",
+          label: "Index Close",
+          defaultOn: true,
+          group: "price",
+          color: "#f59e0b",
+          lineWidth: 1.0,
+          help: "Index close is the external spot-basket reference. Up/down mostly reflects underlying spot movement."
+        },
+        {
+          id: "premium_close",
+          type: "line",
+          key: "premium_close",
+          label: "Premium Close",
+          defaultOn: false,
+          group: "metric",
+          color: "#ec4899",
+          lineWidth: 1.2,
+          help: "Premium close tracks perp deviation versus index. More positive means perp richer than index; more negative means perp discounted."
+        },
+        {
+          id: "basis_bps",
+          type: "line",
+          key: "basis_bps",
+          label: "Basis (bps)",
+          defaultOn: false,
+          group: "metric",
+          color: "#ef4444",
+          lineWidth: 1.2,
+          help: "Basis in bps is (mark/index - 1) * 10,000. Higher positive values mean mark above index; negative values mean mark below index."
+        },
+        {
+          id: "kline_volume",
+          type: "line",
+          key: "kline_volume",
+          label: "Volume",
+          defaultOn: false,
+          group: "metric",
+          color: "#94a3b8",
+          lineWidth: 1.2,
+          help: "Volume is traded contract quantity per bar. Rising volume usually means stronger participation; falling volume suggests thinner activity."
+        },
+        {
+          id: "kline_turnover",
+          type: "line",
+          key: "kline_turnover",
+          label: "Turnover",
+          defaultOn: false,
+          group: "metric",
+          color: "#64748b",
+          lineWidth: 1.2,
+          help: "Turnover is traded notional value per bar. Higher turnover means larger dollar participation."
+        },
+        {
+          id: "open_interest",
+          type: "line",
+          key: "open_interest",
+          label: "Open Interest",
+          defaultOn: false,
+          group: "metric",
+          color: "#a855f7",
+          lineWidth: 1.2,
+          help: "Open interest is total outstanding derivative positions. Rising OI means positions are being added; falling OI means positions are closing."
+        },
+        {
+          id: "buy_ratio",
+          type: "line",
+          key: "buy_ratio",
+          label: "Buy Ratio",
+          defaultOn: false,
+          group: "metric",
+          color: "#16a34a",
+          lineWidth: 1.2,
+          help: "Buy ratio is Bybit account-ratio share of accounts net-long, not market buy flow. Rising values mean a larger long-holder crowd."
+        },
+        {
+          id: "sell_ratio",
+          type: "line",
+          key: "sell_ratio",
+          label: "Sell Ratio",
+          defaultOn: false,
+          group: "metric",
+          color: "#f43f5e",
+          lineWidth: 1.2,
+          help: "Sell ratio is Bybit account-ratio share of accounts net-short. Rising values mean a larger short-holder crowd."
+        },
+        {
+          id: "long_short_ratio",
+          type: "line",
+          key: "long_short_ratio",
+          label: "Long/Short Ratio",
+          defaultOn: false,
+          group: "metric",
+          color: "#14b8a6",
+          lineWidth: 1.2,
+          help: "Long/Short ratio is buy_ratio / sell_ratio. Above 1 means long accounts dominate; below 1 means short accounts dominate."
+        },
+        {
+          id: "funding_rate",
+          type: "markers",
+          key: "funding_rate",
+          xKey: "funding_ts",
+          label: "Funding Rate",
+          defaultOn: false,
+          group: "metric",
+          color: "#e2e8f0",
+          help: "Funding is the periodic transfer between longs and shorts on perps. More positive means longs pay shorts; more negative means shorts pay longs."
+        }
       ];
       const TIMEFRAME_DEFS = [
         { id: "1m", label: "1m", minutes: 1 },
@@ -1033,6 +1168,7 @@ def create_app(
       const savedSnapshotItemsBySymbol = {};
       const selectedSnapshotIdBySymbol = {};
       const markerLinesByView = {};
+      let indicatorTooltipTimer = null;
 
       function currentSymbol() {
         if (idx < 0 || idx >= symbols.length) return null;
@@ -1057,6 +1193,38 @@ def create_app(
 
       function hideSavedSnapshotText() {
         setSavedSnapshotText("", false);
+      }
+
+      function hideIndicatorTooltip() {
+        if (!indicatorTooltipEl) return;
+        indicatorTooltipEl.style.display = "none";
+        indicatorTooltipEl.textContent = "";
+      }
+
+      function clearIndicatorTooltipTimer() {
+        if (indicatorTooltipTimer) {
+          clearTimeout(indicatorTooltipTimer);
+          indicatorTooltipTimer = null;
+        }
+      }
+
+      function showIndicatorTooltip(rowEl, helpText) {
+        if (!indicatorTooltipEl || !rowEl || !helpText) return;
+        const rect = rowEl.getBoundingClientRect();
+        const top = Math.max(8, Math.floor(rect.top + window.scrollY + rect.height + 6));
+        const left = Math.max(8, Math.floor(rect.left + window.scrollX + 4));
+        indicatorTooltipEl.textContent = String(helpText);
+        indicatorTooltipEl.style.top = `${top}px`;
+        indicatorTooltipEl.style.left = `${left}px`;
+        indicatorTooltipEl.style.display = "block";
+      }
+
+      function scheduleIndicatorTooltip(rowEl, helpText) {
+        clearIndicatorTooltipTimer();
+        hideIndicatorTooltip();
+        indicatorTooltipTimer = setTimeout(() => {
+          showIndicatorTooltip(rowEl, helpText);
+        }, 1000);
       }
 
       function hasValidSnapshotId(symbol, snapshotId) {
@@ -1300,7 +1468,8 @@ def create_app(
           mode,
           line: { width: lineWidth, color },
           marker: { size: 6, color },
-          yaxis: axisRef
+          yaxis: axisRef,
+          hoverinfo: "skip"
         };
       }
 
@@ -1323,7 +1492,8 @@ def create_app(
             fillcolor: "rgba(239,68,68,0.22)"
           },
           whiskerwidth: 0.4,
-          opacity: 0.62
+          opacity: 0.62,
+          hoverinfo: "skip"
         };
       }
 
@@ -2102,6 +2272,8 @@ def create_app(
       }
 
       function renderTogglePanel(seriesMeta) {
+        clearIndicatorTooltipTimer();
+        hideIndicatorTooltip();
         legendListEl.innerHTML = "";
         const visibleSeries = seriesMeta.filter((s) => s.hasData);
         const hiddenCount = seriesMeta.length - visibleSeries.length;
@@ -2109,6 +2281,16 @@ def create_app(
         for (const item of visibleSeries) {
           const row = document.createElement("label");
           row.className = "toggle-row";
+          if (item.help) {
+            row.title = item.help;
+          }
+          row.addEventListener("mouseenter", () => {
+            if (item.help) scheduleIndicatorTooltip(row, item.help);
+          });
+          row.addEventListener("mouseleave", () => {
+            clearIndicatorTooltipTimer();
+            hideIndicatorTooltip();
+          });
 
           const cb = document.createElement("input");
           cb.type = "checkbox";
@@ -2133,6 +2315,9 @@ def create_app(
           const txt = document.createElement("span");
           txt.className = "toggle-label";
           txt.textContent = item.label;
+          if (item.help) {
+            txt.title = item.help;
+          }
 
           const styleBtn = document.createElement("button");
           styleBtn.type = "button";
@@ -2335,7 +2520,7 @@ def create_app(
         );
         const markerShapes = markerShapesForSymbol(symbol);
         const layout = {
-          hovermode: "x unified",
+          hovermode: false,
           dragmode: "pan",
           uirevision: `${symbol}:${selectedTimeframeId}`,
           template: "plotly_dark",
