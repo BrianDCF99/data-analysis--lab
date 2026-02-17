@@ -8,6 +8,9 @@ import math
 import os
 import re
 import socket
+import subprocess
+import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +19,12 @@ import duckdb
 import pandas as pd
 from flask import Flask, jsonify, request, Response
 
-from gemini_notes import GeminiNotesConfig, gemini_notes_config_from_dict, summarize_note_with_gemini
+from gemini_notes import (
+    GeminiNotesConfig,
+    gemini_notes_config_from_dict,
+    summarize_note_with_gemini,
+    generate_backtest_script_with_gemini,
+)
 from lab_config import load_config, path_from_config
 
 
@@ -105,6 +113,10 @@ def create_app(
 ) -> Flask:
     app = Flask(__name__)
     symbols_cache: list[str] | None = None
+    project_root = Path(__file__).resolve().parent.parent
+    generated_scripts_root = project_root / "scripts" / "generated"
+    jobs_lock = threading.Lock()
+    backtest_jobs: dict[str, dict[str, Any]] = {}
 
     def get_conn() -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(db_path), read_only=True)
@@ -150,6 +162,158 @@ def create_app(
             if symbols:
                 return symbols
         return []
+
+    def job_summary(job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": job.get("job_id"),
+            "status": job.get("status"),
+            "symbol": job.get("symbol"),
+            "title": job.get("title"),
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "updated_at": job.get("updated_at"),
+            "error": job.get("error"),
+            "script_file": job.get("script_file"),
+            "output_dir": job.get("output_dir"),
+            "stdout_file": job.get("stdout_file"),
+            "stderr_file": job.get("stderr_file"),
+            "return_code": job.get("return_code"),
+        }
+
+    def update_job(job_id: str, **updates: Any) -> None:
+        with jobs_lock:
+            job = backtest_jobs.get(job_id)
+            if not job:
+                return
+            job.update(updates)
+            job["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    def start_backtest_job(note_record: dict[str, Any], ai_summary_markdown: str, note_dir: Path) -> dict[str, Any]:
+        symbol = str(note_record.get("symbol", "UNKNOWN"))
+        title = str(note_record.get("title", "note"))
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        job_id = f"bt_{stamp}_{safe_component(symbol, 'symbol')}"
+        initial_job: dict[str, Any] = {
+            "job_id": job_id,
+            "status": "queued",
+            "symbol": symbol,
+            "title": title,
+            "note_dir": str(note_dir),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with jobs_lock:
+            backtest_jobs[job_id] = initial_job
+
+        def _runner() -> None:
+            update_job(job_id, status="running", started_at=datetime.now(timezone.utc).isoformat(), error=None)
+            prompt_file: str | None = None
+            response_file: str | None = None
+            try:
+                script_req = generate_backtest_script_with_gemini(note_record, ai_summary_markdown, gemini_cfg)
+                prompt_text = script_req.get("prompt")
+                if isinstance(prompt_text, str) and prompt_text.strip():
+                    prompt_path = note_dir / "backtest_gemini_prompt.txt"
+                    prompt_path.write_text(prompt_text, encoding="utf-8")
+                    prompt_file = str(prompt_path)
+
+                response_json = script_req.get("response_json")
+                if isinstance(response_json, dict):
+                    response_path = note_dir / "backtest_gemini_response.json"
+                    response_path.write_text(json.dumps(response_json, indent=2), encoding="utf-8")
+                    response_file = str(response_path)
+
+                if str(script_req.get("status")) != "ok":
+                    update_job(
+                        job_id,
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        error=script_req.get("error") or f"Gemini status: {script_req.get('status')}",
+                        prompt_file=prompt_file,
+                        response_file=response_file,
+                    )
+                    return
+
+                script_code = str(script_req.get("script_code", "")).strip()
+                if not script_code:
+                    update_job(
+                        job_id,
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        error="Gemini returned empty script code.",
+                        prompt_file=prompt_file,
+                        response_file=response_file,
+                    )
+                    return
+
+                generated_scripts_root.mkdir(parents=True, exist_ok=True)
+                script_name = f"{stamp}_{safe_component(symbol, 'symbol')}_{safe_component(title, 'backtest')}.py"
+                script_path = generated_scripts_root / script_name
+                script_path.write_text(script_code + "\n", encoding="utf-8")
+
+                output_dir = note_dir / "backtest_outputs"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                stdout_path = note_dir / "backtest_stdout.log"
+                stderr_path = note_dir / "backtest_stderr.log"
+
+                env = os.environ.copy()
+                env.setdefault("BYBIT_DUCKDB_PATH", str(db_path.resolve()))
+                env.setdefault("BYBIT_OUTPUT_DIR", str(output_dir.resolve()))
+
+                update_job(
+                    job_id,
+                    status="running_script",
+                    script_file=str(script_path),
+                    output_dir=str(output_dir),
+                    prompt_file=prompt_file,
+                    response_file=response_file,
+                )
+
+                proc = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    cwd=str(project_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=7200,
+                )
+
+                stdout_path.write_text(proc.stdout or "", encoding="utf-8")
+                stderr_path.write_text(proc.stderr or "", encoding="utf-8")
+
+                if proc.returncode == 0:
+                    update_job(
+                        job_id,
+                        status="completed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        stdout_file=str(stdout_path),
+                        stderr_file=str(stderr_path),
+                        return_code=proc.returncode,
+                    )
+                else:
+                    update_job(
+                        job_id,
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        stdout_file=str(stdout_path),
+                        stderr_file=str(stderr_path),
+                        return_code=proc.returncode,
+                        error=f"Script exited with code {proc.returncode}",
+                    )
+            except Exception as exc:
+                update_job(
+                    job_id,
+                    status="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=f"Unexpected backtest job failure: {exc}",
+                    prompt_file=prompt_file,
+                    response_file=response_file,
+                )
+
+        thread = threading.Thread(target=_runner, name=f"backtest-{job_id}", daemon=True)
+        thread.start()
+        return initial_job
 
     @app.get("/health")
     def health() -> tuple[dict[str, Any], int]:
@@ -566,13 +730,37 @@ def create_app(
 
         note_path.write_text(json.dumps(note_record, indent=2), encoding="utf-8")
 
+        run_backtest_raw = payload.get("run_backtest", False)
+        if isinstance(run_backtest_raw, bool):
+            run_backtest = run_backtest_raw
+        else:
+            run_backtest = str(run_backtest_raw).strip().lower() in {"1", "true", "yes", "on"}
+        backtest_job_payload: dict[str, Any] | None = None
+        if run_backtest:
+            final_summary_markdown = ""
+            if isinstance(summary_md, str) and summary_md.strip():
+                final_summary_markdown = summary_md.strip()
+            elif ai_summary_input:
+                final_summary_markdown = ai_summary_input.strip()
+            job = start_backtest_job(note_record, final_summary_markdown, note_dir)
+            backtest_job_payload = job_summary(job)
+
         return {
             "ok": True,
             "note_dir": str(note_dir),
             "note_file": str(note_path),
             "image_saved": image_saved,
             "ai_summary": note_record["ai_summary"],
+            "backtest_job": backtest_job_payload,
         }, 200
+
+    @app.get("/api/backtest-jobs/<job_id>")
+    def api_backtest_job(job_id: str) -> tuple[dict[str, Any], int]:
+        with jobs_lock:
+            job = backtest_jobs.get(job_id)
+            if not job:
+                return {"error": "job not found"}, 404
+            return {"ok": True, "job": job_summary(job)}, 200
 
     @app.get("/")
     def index() -> str:
@@ -974,6 +1162,7 @@ def create_app(
           <button id="generateGeminiBtn" type="button">Generate Gemini Draft</button>
           <button id="saveAsIsBtn" type="button" class="hidden">Save As-Is</button>
           <button id="saveNoteBtn" type="button">Save Final Note</button>
+          <button id="saveRunBacktestBtn" type="button">Save + Backtest</button>
         </div>
       </div>
     </div>
@@ -1001,6 +1190,7 @@ def create_app(
       const generateGeminiBtn = document.getElementById("generateGeminiBtn");
       const saveAsIsBtn = document.getElementById("saveAsIsBtn");
       const saveNoteBtn = document.getElementById("saveNoteBtn");
+      const saveRunBacktestBtn = document.getElementById("saveRunBacktestBtn");
       const cancelNoteBtn = document.getElementById("cancelNoteBtn");
       const indicatorTooltipEl = document.getElementById("indicatorTooltip");
 
@@ -1173,6 +1363,7 @@ def create_app(
       const drawnLinesByView = {};
       let isLineKeyDown = false;
       let activeLineDraw = null;
+      const activeBacktestPolls = {};
 
       function currentSymbol() {
         if (idx < 0 || idx >= symbols.length) return null;
@@ -1597,6 +1788,7 @@ def create_app(
         if (generateGeminiBtn) generateGeminiBtn.disabled = busy;
         if (saveAsIsBtn) saveAsIsBtn.disabled = busy;
         if (saveNoteBtn) saveNoteBtn.disabled = busy;
+        if (saveRunBacktestBtn) saveRunBacktestBtn.disabled = busy;
       }
 
       function currentNoteFormData() {
@@ -1731,7 +1923,68 @@ def create_app(
         return aiStatusText;
       }
 
-      async function submitNoteSave({ symbol, title, body, createdAt, aiSummaryMarkdown, skipAiSummary, savingLabel }) {
+      function stopBacktestPolling(jobId) {
+        const timer = activeBacktestPolls[jobId];
+        if (timer) {
+          clearInterval(timer);
+          delete activeBacktestPolls[jobId];
+        }
+      }
+
+      function startBacktestJobPolling(jobInfo) {
+        const jobId = String(jobInfo?.job_id || "").trim();
+        if (!jobId) return;
+        stopBacktestPolling(jobId);
+
+        const poll = async () => {
+          try {
+            const res = await fetch(`/api/backtest-jobs/${encodeURIComponent(jobId)}`);
+            const payload = await res.json();
+            if (!res.ok || !payload?.ok) {
+              const errMsg = payload?.error ? String(payload.error) : `HTTP ${res.status}`;
+              setMetaMessage(`Backtest job ${jobId} status error: ${errMsg}`);
+              return;
+            }
+            const job = payload.job || {};
+            const status = String(job.status || "unknown");
+            if (status === "completed") {
+              const outDir = String(job.output_dir || "");
+              const scriptPath = String(job.script_file || "");
+              setMetaMessage(
+                `Backtest completed (${jobId})${scriptPath ? ` | script: ${scriptPath}` : ""}${outDir ? ` | output: ${outDir}` : ""}`
+              );
+              stopBacktestPolling(jobId);
+              return;
+            }
+            if (status === "failed") {
+              const err = String(job.error || "unknown error");
+              setMetaMessage(`Backtest failed (${jobId}): ${err}`);
+              stopBacktestPolling(jobId);
+              return;
+            }
+            setMetaMessage(`Backtest ${status} (${jobId})...`);
+          } catch (err) {
+            setMetaMessage(`Backtest poll failed (${jobId}): ${String(err)}`);
+          }
+        };
+
+        void poll();
+        activeBacktestPolls[jobId] = setInterval(() => {
+          void poll();
+        }, 3000);
+      }
+
+      async function submitNoteSave({
+        symbol,
+        title,
+        body,
+        createdAt,
+        aiSummaryMarkdown,
+        skipAiSummary,
+        runBacktest = false,
+        closeModalOnSuccess = false,
+        savingLabel
+      }) {
         setNoteStatus(savingLabel || "Saving note...");
         setNoteButtonsBusy(true);
         const snapshot = collectCurrentSnapshot(symbol);
@@ -1752,6 +2005,7 @@ def create_app(
               ai_summary_markdown: aiSummaryMarkdown || "",
               ai_preview: currentAiPreview,
               skip_ai_summary: Boolean(skipAiSummary),
+              run_backtest: Boolean(runBacktest),
             }),
           });
           const payload = await res.json();
@@ -1773,11 +2027,23 @@ def create_app(
             selectedSnapshotIdBySymbol[symbol] = savedSnapshotId;
           }
           await refreshSavedSnapshotsForSymbol(symbol);
+
+          const backtestJob = payload?.backtest_job;
+          if (backtestJob && typeof backtestJob === "object" && backtestJob.job_id) {
+            const jobId = String(backtestJob.job_id);
+            setMetaMessage(`Backtest queued (${jobId}) for ${symbol}. Running in background...`);
+            startBacktestJobPolling(backtestJob);
+          }
+          if (closeModalOnSuccess) {
+            closeNoteModal();
+          }
+          return payload;
         } catch (err) {
           setNoteStatus(`Save failed: ${String(err)}`, true);
         } finally {
           setNoteButtonsBusy(false);
         }
+        return null;
       }
 
       async function generateGeminiDraft() {
@@ -1899,6 +2165,49 @@ def create_app(
           aiSummaryMarkdown,
           skipAiSummary: false,
           savingLabel: "Saving final note...",
+        });
+      }
+
+      async function saveAndRunBacktest() {
+        const form = currentNoteFormData();
+        if (form.error) {
+          setNoteStatus(String(form.error), true);
+          if (form.focus) form.focus.focus();
+          return;
+        }
+        const symbol = String(form.symbol);
+        const title = String(form.title);
+        const body = String(form.body);
+        const createdAt = String(form.createdAt);
+        const previewStatus = String(currentAiPreview?.status || "");
+        if (previewStatus !== "ok") {
+          if (aiPreviewFailed) {
+            setNoteStatus("Gemini preview failed. Retry Gemini Draft before running backtest.", true);
+            if (generateGeminiBtn) generateGeminiBtn.focus();
+            return;
+          }
+          setNoteStatus("Generate Gemini draft first, then use Save + Backtest.", true);
+          if (generateGeminiBtn) generateGeminiBtn.focus();
+          return;
+        }
+
+        const aiSummaryMarkdown = String(noteAiSummaryInput?.value || "").trim();
+        if (!aiSummaryMarkdown) {
+          setNoteStatus("Gemini draft is empty. Retry Gemini Draft before running backtest.", true);
+          if (generateGeminiBtn) generateGeminiBtn.focus();
+          return;
+        }
+
+        await submitNoteSave({
+          symbol,
+          title,
+          body,
+          createdAt,
+          aiSummaryMarkdown,
+          skipAiSummary: false,
+          runBacktest: true,
+          closeModalOnSuccess: true,
+          savingLabel: "Saving note and queuing backtest...",
         });
       }
 
@@ -3011,6 +3320,11 @@ def create_app(
       if (saveNoteBtn) {
         saveNoteBtn.addEventListener("click", () => {
           void saveCurrentNote();
+        });
+      }
+      if (saveRunBacktestBtn) {
+        saveRunBacktestBtn.addEventListener("click", () => {
+          void saveAndRunBacktest();
         });
       }
       if (noteTitleInput) {
